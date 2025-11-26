@@ -61,7 +61,6 @@ import {
 import { extractGroupMetadata } from './groups'
 import { makeMessagesSocket } from './messages-send'
 
-
 export const makeMessagesRecvSocket = (config: SocketConfig) => {
 	const { logger, retryRequestDelayMs, maxMsgRetryCount, getMessage, shouldIgnoreJid } = config
 	const sock = makeMessagesSocket(config)
@@ -227,8 +226,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				receipt.attrs.participant = node.attrs.participant
 			}
 
-			if (retryCount <=2 && forceIncludeKeys) {
-				await assertSessions([jidNormalizedUser(author)], true);
+			if (retryCount <= 2 && forceIncludeKeys) {
+				await assertSessions([jidNormalizedUser(author)], true)
 				const { update, preKeys } = await getNextPreKeys(authState, 1)
 
 				const [keyId] = Object.keys(preKeys)
@@ -397,19 +396,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 
 		switch (nodeType) {
 			case 'privacy_token':
-				const tokenList = getBinaryNodeChildren(child, 'token')
-				for (const { attrs, content } of tokenList) {
-					const jid = attrs.jid
-					ev.emit('chats.update', [
-						{
-							id: jid,
-							tcToken: content as Buffer
-						}
-					])
-
-					logger.debug({ jid }, 'got privacy token update')
-				}
-
+				await handlePrivacyTokenNotification(node)
 				break
 			case 'newsletter':
 				await handleNewsletterNotification(node)
@@ -572,6 +559,50 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		}
 	}
 
+	const handlePrivacyTokenNotification = async (node: BinaryNode) => {
+		const tokensNode: BinaryNode | undefined = getBinaryNodeChild(node, 'tokens')
+		const from: string = jidNormalizedUser(node.attrs.from)
+		let lidForPN: string | null = null
+		try {
+			lidForPN = await signalRepository.getLIDMappingStore().getLIDForPN(from)
+		} catch (error) {
+			logger.warn({ error, jid: from }, 'Failed to get lid for PN in handlePrivacyTokenNotification.')
+		}
+
+		if (!tokensNode) {
+			return
+		}
+
+		const tokenNodes: BinaryNode[] = getBinaryNodeChildren(tokensNode, 'token')
+
+		for (const tokenNode of tokenNodes) {
+			const { attrs, content } = tokenNode
+			const type: string = attrs.type
+			const timestamp: string = attrs.t
+
+			if (type === 'trusted_contact' && content instanceof Buffer) {
+				logger.debug(
+					{
+						from,
+						timestamp,
+						tcToken: content
+					},
+					'received trusted contact token'
+				)
+
+				await authState.keys.set({
+					'tc-token': { [from]: { token: content, timestamp } }
+				})
+
+				if (lidForPN) {
+					await authState.keys.set({
+						'tc-token': { [lidForPN]: { token: content, timestamp } }
+					})
+				}
+			}
+		}
+	}
+
 	async function decipherLinkPublicKey(data: Uint8Array | Buffer) {
 		const buffer = toRequiredBuffer(data)
 		const salt = buffer.slice(0, 32)
@@ -621,14 +652,13 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		for (const [i, msg] of msgs.entries()) {
 			if (msg) {
 				updateSendMessageAgainCount(ids[i], participant)
-				const msgRelayOpts: MessageRelayOptions = { messageId: ids[i], isretry:true }				
-					msgRelayOpts.participant = {
-						jid: participant,
-						count: +retryNode.attrs.count					
-					
+				const msgRelayOpts: MessageRelayOptions = { messageId: ids[i], isretry: true }
+				msgRelayOpts.participant = {
+					jid: participant,
+					count: +retryNode.attrs.count
 				}
 
-				await relayMessage(key.remoteJid!, msg, msgRelayOpts,)
+				await relayMessage(key.remoteJid!, msg, msgRelayOpts)
 			} else {
 				logger.debug({ jid: key.remoteJid, id: ids[i] }, 'recv retry request, but message not available')
 			}
@@ -761,6 +791,11 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 	}
 
 	const handleMessage = async (node: BinaryNode) => {
+		const senderLid: string = node.attrs.from.includes('@lid') ? node.attrs.from : node.attrs.sender_lid || node.attrs.participant_lid
+		const pn: string = node.attrs.from.includes('@s.whatsapp.net') ? node.attrs.from : node.attrs.sender_pn || node.attrs.participant_pn
+		if (senderLid && pn) {
+			await signalRepository.getLIDMappingStore().storeLIDPNMapping(senderLid, pn)
+		}
 		if (shouldIgnoreJid(node.attrs.from) && node.attrs.from !== '@s.whatsapp.net') {
 			logger.debug({ key: node.attrs.key }, 'ignored message')
 			await sendMessageAck(node)
@@ -948,15 +983,12 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		const callId = infoChild.attrs['call-id']
 		const from = infoChild.attrs.from || infoChild.attrs['call-creator']
 		status = getCallStatusFromNode(infoChild)
-		if(isLidUser(from) && infoChild.tag==='relaylatency')
-		{
-			const verify = callOfferCache.get(callId);
-			if(!verify)
-			{
-				status = 'offer';
-				callOfferCache.set(callId,true);
+		if (isLidUser(from) && infoChild.tag === 'relaylatency') {
+			const verify = callOfferCache.get(callId)
+			if (!verify) {
+				status = 'offer'
+				callOfferCache.set(callId, true)
 			}
-
 		}
 		const call: WACallEvent = {
 			chatId: attrs.from,
@@ -985,9 +1017,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		// delete data once call has ended
 		if (status === 'reject' || status === 'accept' || status === 'timeout' || status === 'terminate') {
 			callOfferCache.del(call.id)
-			if(isLidUser(from))
-			{
-			 callOfferCache.del(from)	
+			if (isLidUser(from)) {
+				callOfferCache.del(from)
 			}
 		}
 
@@ -1262,40 +1293,40 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				break
 		}
 	}
-		const handlePresenceUpdate = ({ tag, attrs, content }: BinaryNode) => {
-			let presence: PresenceData | undefined
-			const jid = attrs.from
-			const participant = attrs.participant || attrs.from
-	
-			if (shouldIgnoreJid(jid)) {
-				return
-			}
-	
-			if (tag === 'presence') {
-				presence = {
-					lastKnownPresence: attrs.type === 'unavailable' ? 'unavailable' : 'available',
-					lastSeen: attrs.last && attrs.last !== 'deny' ? +attrs.last : undefined
-				}
-			} else if (Array.isArray(content)) {
-				const [firstChild] = content
-				let type = firstChild.tag as WAPresence
-				if (type === 'paused') {
-					type = 'available'
-				}
-	
-				if (firstChild.attrs?.media === 'audio') {
-					type = 'recording'
-				}
-	
-				presence = { lastKnownPresence: type }
-			} else {
-				logger.error({ tag, attrs, content }, 'recv invalid presence node')
-			}
-	
-			if (presence) {
-				ev.emit('presence.update', { id: jid, presences: { [participant]: presence } })
-			}
+	const handlePresenceUpdate = ({ tag, attrs, content }: BinaryNode) => {
+		let presence: PresenceData | undefined
+		const jid = attrs.from
+		const participant = attrs.participant || attrs.from
+
+		if (shouldIgnoreJid(jid)) {
+			return
 		}
+
+		if (tag === 'presence') {
+			presence = {
+				lastKnownPresence: attrs.type === 'unavailable' ? 'unavailable' : 'available',
+				lastSeen: attrs.last && attrs.last !== 'deny' ? +attrs.last : undefined
+			}
+		} else if (Array.isArray(content)) {
+			const [firstChild] = content
+			let type = firstChild.tag as WAPresence
+			if (type === 'paused') {
+				type = 'available'
+			}
+
+			if (firstChild.attrs?.media === 'audio') {
+				type = 'recording'
+			}
+
+			presence = { lastKnownPresence: type }
+		} else {
+			logger.error({ tag, attrs, content }, 'recv invalid presence node')
+		}
+
+		if (presence) {
+			ev.emit('presence.update', { id: jid, presences: { [participant]: presence } })
+		}
+	}
 
 	// recv a message
 	ws.on('CB:message', (node: BinaryNode) => {

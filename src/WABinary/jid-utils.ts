@@ -3,14 +3,13 @@ export const OFFICIAL_BIZ_JID = '16505361212@c.us'
 export const SERVER_JID = 'server@c.us'
 export const PSA_WID = '0@c.us'
 export const STORIES_JID = 'status@broadcast'
-export const META_AI_JID = '13135550002@c.us'
 
 export type JidServer = 'c.us' | 'g.us' | 'broadcast' | 's.whatsapp.net' | 'call' | 'lid' | 'newsletter' | 'bot'
 
 export type JidWithDevice = {
 	user: string
 	device?: number
-	jid?:string
+	jid?: string
 }
 
 export type FullJid = JidWithDevice & {
@@ -47,9 +46,11 @@ export const areJidsSameUser = (jid1: string | undefined, jid2: string | undefin
 	jidDecode(jid1)?.user === jidDecode(jid2)?.user
 /** is the jid Meta IA */
 export const isJidMetaIa = (jid: string | undefined) => jid?.endsWith('@bot')
-/** is the jid a user */
+/** is the jid a PN user */
 export const isJidUser = (jid: string | undefined) => jid?.endsWith('@s.whatsapp.net')
-/** is the jid a group */
+/** is the jid a PN user */
+export const isPnUser = (jid: string | undefined) => jid?.endsWith('@s.whatsapp.net')
+/** is the jid a LID */
 export const isLidUser = (jid: string | undefined) => jid?.endsWith('@lid')
 /** is the jid a broadcast */
 export const isJidBroadcast = (jid: string | undefined) => jid?.endsWith('@broadcast')
@@ -59,6 +60,10 @@ export const isJidGroup = (jid: string | undefined) => jid?.endsWith('@g.us')
 export const isJidStatusBroadcast = (jid: string) => jid === 'status@broadcast'
 /** is the jid a newsletter */
 export const isJidNewsletter = (jid: string | undefined) => jid?.endsWith('@newsletter')
+/** is the jid a hosted PN */
+export const isHostedPnUser = (jid: string | undefined) => jid?.endsWith('@hosted')
+/** is the jid a hosted LID */
+export const isHostedLidUser = (jid: string | undefined) => jid?.endsWith('@hosted.lid')
 
 const botRegexp = /^1313555\d{4}$|^131655500\d{2}$/
 
@@ -72,4 +77,11 @@ export const jidNormalizedUser = (jid: string | undefined) => {
 
 	const { user, server } = result
 	return jidEncode(user, server === 'c.us' ? 's.whatsapp.net' : (server as JidServer))
+}
+
+export const transferDevice = (fromJid: string, toJid: string) => {
+	const fromDecoded: FullJid | undefined = jidDecode(fromJid)
+	const deviceId: number = fromDecoded?.device || 0
+	const { server, user } = jidDecode(toJid)!
+	return jidEncode(user, server, deviceId)
 }

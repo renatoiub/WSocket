@@ -116,7 +116,6 @@ export const generateRegistrationNode = (
 			secondary: 15,
 			tertiary: 7
 		}
-
 	}
 
 	const companionProto = proto.DeviceProps.encode(companion).finish()

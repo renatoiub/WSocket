@@ -139,7 +139,9 @@ export async function hkdf(
 	const infoBytes = info.info ? new TextEncoder().encode(info.info) : new Uint8Array(0)
 
 	// Import the input key material
-	const importedKey: CryptoKey= await subtle.importKey('raw', inputKeyMaterial, { name: 'HKDF' }, false, ['deriveBits'])
+	const importedKey: CryptoKey = await subtle.importKey('raw', inputKeyMaterial, { name: 'HKDF' }, false, [
+		'deriveBits'
+	])
 
 	// Derive bits using HKDF
 	const derivedBits = await subtle.deriveBits(

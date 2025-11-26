@@ -108,10 +108,16 @@ export const MEDIA_KEYS = Object.keys(MEDIA_PATH_MAP) as MediaType[]
 export const MIN_PREKEY_COUNT = 5
 
 export const INITIAL_PREKEY_COUNT = 30
+export const MIN_UPLOAD_INTERVAL = 5000
+export const UPLOAD_TIMEOUT = 30000
 
 export const DEFAULT_CACHE_TTLS = {
 	SIGNAL_STORE: 5 * 60, // 5 minutes
 	MSG_RETRY: 60 * 60, // 1 hour
 	CALL_OFFER: 5 * 60, // 5 minutes
-	USER_DEVICES: 5 * 60 // 5 minutes
+	USER_DEVICES: 5 * 60, // 5 minutes
+	LID_CACHE: 5 * 60, // 5 minutes
+	SESSION_MIGRATION_CACHE: 60 * 60, // 1 hour
+	SESSION_VALIDATION_CACHE: 60 * 60, // 1 hour
+	PEER_SESSIONS: 5 * 60 // 5 minutes
 }

@@ -25,7 +25,6 @@ import { Curve, generateSignalPubKey } from './crypto'
 import { encodeBigEndian } from './generics'
 import { convertlidDevice } from './messages'
 
-
 export const createSignalIdentity = (wid: string, accountSignatureKey: Uint8Array): SignalIdentity => {
 	return {
 		identifier: { name: wid, deviceId: 0 },
@@ -79,7 +78,13 @@ export const xmppPreKey = (pair: KeyPair, id: number): BinaryNode => ({
 	]
 })
 
-export const parseAndInjectE2ESessions = async (node: BinaryNode, repository: SignalRepository, lid?: string | null | undefined, meid?: string, melid?:string) => {
+export const parseAndInjectE2ESessions = async (
+	node: BinaryNode,
+	repository: SignalRepository,
+	lid?: string | null | undefined,
+	meid?: string,
+	melid?: string
+) => {
 	const extractKey = (key: BinaryNode) =>
 		key
 			? {
@@ -107,7 +112,7 @@ export const parseAndInjectE2ESessions = async (node: BinaryNode, repository: Si
 				const key = getBinaryNodeChild(node, 'key')!
 				const identity = getBinaryNodeChildBuffer(node, 'identity')!
 				const jid = node.attrs.jid
-				const registrationId = getBinaryNodeChildUInt(node, 'registration', 4);
+				const registrationId = getBinaryNodeChildUInt(node, 'registration', 4)
 				const newlid = convertlidDevice(jid, lid, meid, melid)
 
 				await repository.injectE2ESession({
@@ -124,7 +129,12 @@ export const parseAndInjectE2ESessions = async (node: BinaryNode, repository: Si
 	}
 }
 
-export const extractDeviceJids = (result: USyncQueryResultList[], myJid: string, excludeZeroDevices: boolean, mylid?:string) => {
+export const extractDeviceJids = (
+	result: USyncQueryResultList[],
+	myJid: string,
+	excludeZeroDevices: boolean,
+	mylid?: string
+) => {
 	const { user: myUser, device: myDevice } = jidDecode(myJid)!
 	const { user: mylidUser, device: melidDevice } = jidDecode(mylid)!
 
@@ -142,7 +152,7 @@ export const extractDeviceJids = (result: USyncQueryResultList[], myJid: string,
 					(mylidUser !== user || melidDevice !== device) &&
 					(device === 0 || !!keyIndex) // ensure that "key-index" is specified for "non-zero" devices, produces a bad req otherwise
 				) {
-					extracted.push({ user, device, jid:userResult.id })
+					extracted.push({ user, device, jid: userResult.id })
 				}
 			}
 		}
