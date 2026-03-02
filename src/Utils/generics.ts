@@ -63,6 +63,10 @@ export const BufferJSON = {
 export const getKeyAuthor = (key: proto.IMessageKey | undefined | null, meId = 'me') =>
 	(key?.fromMe ? meId : key?.participant || key?.remoteJid) || ''
 
+export const isStringNullOrEmpty = (value: string | null | undefined): value is null | undefined | '' =>
+	// eslint-disable-next-line eqeqeq
+	value == null || value === ''
+
 export const writeRandomPadMax16 = (msg: Uint8Array) => {
 	const pad = randomBytes(1)
 	const padLength = (pad[0]! & 0x0f) + 1
@@ -240,7 +244,7 @@ export const bindWaitForConnectionUpdate = (ev: BaileysEventEmitter) => bindWait
  * utility that fetches latest baileys version from the master branch.
  * Use to ensure your WA connection is always on the latest version
  */
-export const fetchLatestBaileysVersion = async (options: AxiosRequestConfig<{}> = {}) => {
+export const fetchLatestBaileysVersion = async (options: AxiosRequestConfig = {}) => {
 	const URL = 'https://raw.githubusercontent.com/WhiskeySockets/Baileys/master/src/Defaults/baileys-version.json'
 	try {
 		const result = await axios.get<{ version: WAVersion }>(URL, {
@@ -264,7 +268,7 @@ export const fetchLatestBaileysVersion = async (options: AxiosRequestConfig<{}> 
  * A utility that fetches the latest web version of whatsapp.
  * Use to ensure your WA connection is always on the latest version
  */
-export const fetchLatestWaWebVersion = async (options: AxiosRequestConfig<{}>) => {
+export const fetchLatestWaWebVersion = async (options: AxiosRequestConfig) => {
 	try {
 		const { data } = await axios.get('https://web.whatsapp.com/sw.js', {
 			...options,
@@ -328,23 +332,49 @@ const CODE_MAP: { [_: string]: DisconnectReason } = {
 	conflict: DisconnectReason.connectionReplaced
 }
 
-/**
- * Stream errors generally provide a reason, map that to a baileys DisconnectReason
- * @param reason the string reason given, eg. "conflict"
- */
 export const getErrorCodeFromStreamError = (node: BinaryNode) => {
 	const [reasonNode] = getAllBinaryNodeChildren(node)
-	let reason = reasonNode?.tag || 'unknown'
-	const statusCode = +(node.attrs.code || CODE_MAP[reason] || DisconnectReason.badSession)
 
-	if (statusCode === DisconnectReason.restartRequired) {
-		reason = 'restart required'
+	// 1. Conflict child — check type attribute
+	// WA Web: 'replaced' is explicit, everything else (including 'device_removed') is the default
+	// Reference: WAWebHandleStreamError parser
+	if (reasonNode?.tag === 'conflict') {
+		const conflictType = reasonNode.attrs?.type
+		if (conflictType === 'replaced') {
+			return { reason: 'replaced', statusCode: DisconnectReason.connectionReplaced }
+		}
+
+		// 'device_removed' or any unknown conflict type → treat as device removed (logout)
+		return { reason: 'device_removed', statusCode: DisconnectReason.loggedOut }
 	}
 
-	return {
-		reason,
-		statusCode
+	// 2. Numeric code attribute (515, 516, etc.)
+	if (node.attrs.code) {
+		const code = +node.attrs.code
+		if (code === DisconnectReason.restartRequired) {
+			return { reason: 'restart required', statusCode: DisconnectReason.restartRequired }
+		}
+
+		if (code === DisconnectReason.sessionInvalidated) {
+			return { reason: 'session invalidated', statusCode: DisconnectReason.sessionInvalidated }
+		}
+
+		return { reason: `code ${code}`, statusCode: code }
 	}
+
+	// 3. Ack child — message-level error escalated to stream
+	if (reasonNode?.tag === 'ack') {
+		return { reason: 'ack', statusCode: DisconnectReason.badSession }
+	}
+
+	// 4. xml-not-well-formed — we sent a malformed stanza
+	if (reasonNode?.tag === 'xml-not-well-formed') {
+		return { reason: 'xml-not-well-formed', statusCode: DisconnectReason.badSession }
+	}
+
+	// 5. Unknown
+	const reason = reasonNode?.tag || 'unknown'
+	return { reason, statusCode: DisconnectReason.badSession }
 }
 
 export const getCallStatusFromNode = ({ tag, attrs }: BinaryNode) => {

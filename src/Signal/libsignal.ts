@@ -9,7 +9,7 @@ import { SenderKeyRecord } from './Group/sender-key-record'
 import { GroupCipher, GroupSessionBuilder, SenderKeyDistributionMessage } from './Group'
 
 export function makeLibSignalRepository(auth: SignalAuthState): SignalRepository {
-	const storage: SenderKeyStore = signalStorage(auth)
+	const storage = signalStorage(auth)
 	return {
 		decryptGroupMessage({ group, authorJid, msg }) {
 			const senderName = jidToSignalSenderKeyName(group, authorJid)
@@ -39,6 +39,24 @@ export function makeLibSignalRepository(auth: SignalAuthState): SignalRepository
 			}
 
 			await builder.process(senderName, senderMsg)
+		},
+		async validateSession(jid: string) {
+			try {
+				const addr = jidToSignalProtocolAddress(jid)
+				const session = await storage.loadSession(addr.toString())
+
+				if (!session) {
+					return { exists: false, reason: 'no session' }
+				}
+
+				if (!session.haveOpenSession()) {
+					return { exists: false, reason: 'no open session' }
+				}
+
+				return { exists: true }
+			} catch (error) {
+				return { exists: false, reason: 'validation error' }
+			}
 		},
 		async decryptMessage({ jid, type, ciphertext }) {
 			const addr = jidToSignalProtocolAddress(jid)
@@ -103,7 +121,14 @@ const jidToSignalSenderKeyName = (group: string, user: string): SenderKeyName =>
 	return new SenderKeyName(group, jidToSignalProtocolAddress(user))
 }
 
-function signalStorage({ creds, keys }: SignalAuthState): SenderKeyStore & Record<string, any> {
+
+function signalStorage(
+	{ creds, keys }: SignalAuthState,
+): SenderKeyStore &
+	libsignal.SignalStorage & {
+		loadIdentityKey(id: string): Promise<Uint8Array | undefined>
+		saveIdentity(id: string, identityKey: Uint8Array): Promise<boolean>
+	} {
 	return {
 		loadSession: async (id: string) => {
 			const { [id]: sess } = await keys.get('session', [id])
@@ -154,8 +179,18 @@ function signalStorage({ creds, keys }: SignalAuthState): SenderKeyStore & Recor
 			const { signedIdentityKey } = creds
 			return {
 				privKey: Buffer.from(signedIdentityKey.private),
-				pubKey: generateSignalPubKey(signedIdentityKey.public)
+				pubKey: Buffer.from(generateSignalPubKey(signedIdentityKey.public))
 			}
+		},
+		loadIdentityKey: async (id: string) => {
+			const { [id]: identity } = await keys.get('identity-key', [id])
+			if (identity) {
+				return identity as Uint8Array
+			}
+		},
+		saveIdentity: async (id: string, identityKey: Uint8Array) => {
+			await keys.set({ 'identity-key': { [id]: identityKey } })
+			return true
 		}
 	}
 }

@@ -26,7 +26,7 @@ type ProcessMessageContext = {
 	keyStore: SignalKeyStoreWithTransaction
 	ev: BaileysEventEmitter
 	logger?: ILogger
-	options: AxiosRequestConfig<{}>
+	options: AxiosRequestConfig
 }
 
 const REAL_MSG_STUB_TYPES = new Set([

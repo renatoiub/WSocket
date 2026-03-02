@@ -60,6 +60,9 @@ import {
 } from '../WABinary'
 import { extractGroupMetadata } from './groups'
 import { makeMessagesSocket } from './messages-send'
+import { isTcTokenExpired, resolveTcTokenJid } from '../Utils/tc-token-utils'
+import caches from '../Utils/cache-utils'
+import { handleIdentityChange } from '../Utils/identity-change-handler'
 
 
 export const makeMessagesRecvSocket = (config: SocketConfig) => {
@@ -80,7 +83,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		relayMessage,
 		sendReceipt,
 		uploadPreKeys,
-		sendPeerDataOperationMessage
+		sendPeerDataOperationMessage,
+		getPrivacyTokens
 	} = sock
 
 	/** this mutex ensures that each retryRequest will wait for the previous one to finish */
@@ -105,6 +109,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 			stdTTL: DEFAULT_CACHE_TTLS.MSG_RETRY, // 1 hour
 			useClones: false
 		})
+
+	const identityAssertDebounce = new NodeCache({ stdTTL: 5, useClones: false })
 
 	let sendActiveReceipts = false
 
@@ -227,7 +233,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				receipt.attrs.participant = node.attrs.participant
 			}
 
-			if (retryCount <=2 && forceIncludeKeys) {
+			if (retryCount <= 2 && forceIncludeKeys) {
 				await assertSessions([jidNormalizedUser(author)], true);
 				const { update, preKeys } = await getNextPreKeys(authState, 1)
 
@@ -260,7 +266,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		const from = node.attrs.from
 		if (from === S_WHATSAPP_NET) {
 			const countChild = getBinaryNodeChild(node, 'count')
-			const count = +countChild!.attrs.value
+			const count = +countChild!.attrs.value!
 			const shouldUploadMorePreKeys = count < MIN_PREKEY_COUNT
 
 			logger.debug({ count, shouldUploadMorePreKeys }, 'recv pre-key count')
@@ -268,12 +274,42 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				await uploadPreKeys()
 			}
 		} else {
-			const identityNode = getBinaryNodeChild(node, 'identity')
-			if (identityNode) {
-				logger.info({ jid: from }, 'identity changed')
-				// not handling right now
-				// signal will override new identity anyway
-			} else {
+			const result = await handleIdentityChange(node, {
+				meId: authState.creds.me?.id,
+				meLid: authState.creds.me?.lid,
+				validateSession: signalRepository.validateSession,
+				assertSessions,
+				debounceCache: identityAssertDebounce,
+				logger
+			})
+
+			if (result.action === 'session_refreshed') {
+				// Re-issue tctoken after identity change if we previously issued one
+				// Matches WAWebSendTcTokenWhenDeviceIdentityChange
+				try {
+					const normalizedJid = jidNormalizedUser(from)
+					const getLidForCache = caches.lidCache.get(from)
+					const tcJid = await resolveTcTokenJid(
+						normalizedJid
+					)
+					const tcTokenData = await authState.keys.get('tctoken', [tcJid])
+					const senderTs = tcTokenData?.[tcJid]?.senderTimestamp
+
+					// Only re-issue if we previously sent a token AND it's still valid
+					if (senderTs !== null && senderTs !== undefined && !isTcTokenExpired(senderTs)) {
+						logger.debug({ jid: normalizedJid, senderTimestamp: senderTs }, 'identity changed, re-issuing tctoken')
+						// Pass original senderTimestamp to match WA Web
+						getPrivacyTokens([normalizedJid], senderTs).catch(err => {
+							logger.debug(
+								{ jid: normalizedJid, err: err?.message },
+								'failed to re-issue tctoken after identity change'
+							)
+						})
+					}
+				} catch (err: any) {
+					logger.warn({ from, err: err?.message }, 'error checking tctoken for re-issuance after identity change')
+				}
+			} else if (result.action === 'no_identity_node') {
 				logger.info({ node }, 'unknown encrypt notification')
 			}
 		}
@@ -565,10 +601,129 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				})
 				authState.creds.registered = true
 				ev.emit('creds.update', authState.creds)
+				break
+			case 'privacy_token':
+				await handlePrivacyTokenNotification(node)
+				break
 		}
 
 		if (Object.keys(result).length) {
 			return result
+		}
+	}
+
+	/** tracks JIDs for which we have stored tctokens — used for periodic pruning */
+	const tcTokenKnownJids = new Set<string>()
+
+	/**
+	 * Sentinel key used to persist the tcTokenKnownJids set across restarts.
+	 * Stored as a tctoken entry where `token` contains a JSON array of JID strings.
+	 * This ensures pruning can clean up ALL stored tokens, not just ones seen in the current session.
+	 */
+	const TC_TOKEN_INDEX_KEY = '__index'
+
+	/** load persisted tctoken JID index from store */
+	const tcTokenIndexLoaded = (async () => {
+		try {
+			const data = await authState.keys.get('tctoken', [TC_TOKEN_INDEX_KEY])
+			const entry = data[TC_TOKEN_INDEX_KEY]
+			if (entry?.token) {
+				const jids = JSON.parse(Buffer.from(entry.token).toString())
+				if (!Array.isArray(jids)) {
+					throw new Error('tctoken index is not an array')
+				}
+
+				for (const jid of jids) {
+					if (jid && jid !== TC_TOKEN_INDEX_KEY) {
+						tcTokenKnownJids.add(jid)
+					}
+				}
+
+				logger.debug({ count: tcTokenKnownJids.size }, 'loaded tctoken index')
+			}
+		} catch (err: any) {
+			logger.warn({ err: err?.message }, 'failed to load tctoken index')
+		}
+	})()
+
+	/** debounced save of tctoken JID index */
+	let tcTokenIndexTimer: ReturnType<typeof setTimeout> | undefined
+	function scheduleTcTokenIndexSave() {
+		if (tcTokenIndexTimer) {
+			clearTimeout(tcTokenIndexTimer)
+		}
+
+		tcTokenIndexTimer = setTimeout(async () => {
+			try {
+				await authState.keys.set({
+					tctoken: {
+						[TC_TOKEN_INDEX_KEY]: {
+							token: Buffer.from(JSON.stringify([...tcTokenKnownJids]))
+						}
+					}
+				})
+			} catch (err: any) {
+				logger.warn({ err: err?.message }, 'failed to save tctoken index')
+			}
+		}, 5000)
+	}
+
+	const handlePrivacyTokenNotification = async (node: BinaryNode) => {
+		const tokensNode = getBinaryNodeChild(node, 'tokens')
+		const from = jidNormalizedUser(node.attrs.from)
+
+		if (!tokensNode) return
+
+		const cacheLid = caches.lidCache.get(from)
+
+		// WA Web uses: senderLid ?? toLid(from) for the storage key
+		// The sender_lid attribute provides the LID directly when available
+		const senderLid =
+			node.attrs.sender_lid && isLidUser(jidNormalizedUser(node.attrs.sender_lid))
+				? jidNormalizedUser(node.attrs.sender_lid)
+				: undefined
+		const storageJid =
+			senderLid ?? cacheLid
+
+		const tokenNodes = getBinaryNodeChildren(tokensNode, 'token')
+
+		for (const tokenNode of tokenNodes) {
+			const { attrs, content } = tokenNode
+			const type = attrs.type
+			const timestamp = attrs.t
+
+			if (type === 'trusted_contact' && content instanceof Uint8Array) {
+				logger.debug(
+					{
+						from,
+						storageJid,
+						timestamp,
+						tcToken: content
+					},
+					'received trusted contact token'
+				)
+
+				// Preserve existing senderTimestamp to avoid racing with fire-and-forget
+				const existingData = await authState.keys.get('tctoken', [storageJid])
+				const existing = existingData[storageJid]
+
+				// Timestamp monotonicity guard — only store if incoming timestamp >= existing
+				// Matches WA Web handleIncomingTcToken
+				const existingTs = existing?.timestamp ? Number(existing.timestamp) : 0
+				const incomingTs = timestamp ? Number(timestamp) : 0
+				if (existingTs > 0 && incomingTs > 0 && existingTs > incomingTs) {
+					logger.debug({ storageJid, existingTs, incomingTs }, 'skipping tctoken store — existing timestamp is newer')
+					continue
+				}
+
+				await authState.keys.set({
+					tctoken: { [storageJid]: { ...existing, token: Buffer.from(content), timestamp } }
+				})
+				if (!tcTokenKnownJids.has(storageJid)) {
+					tcTokenKnownJids.add(storageJid)
+					scheduleTcTokenIndexSave()
+				}
+			}
 		}
 	}
 
@@ -621,11 +776,11 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		for (const [i, msg] of msgs.entries()) {
 			if (msg) {
 				updateSendMessageAgainCount(ids[i], participant)
-				const msgRelayOpts: MessageRelayOptions = { messageId: ids[i], isretry:true }				
-					msgRelayOpts.participant = {
-						jid: participant,
-						count: +retryNode.attrs.count					
-					
+				const msgRelayOpts: MessageRelayOptions = { messageId: ids[i], isretry: true }
+				msgRelayOpts.participant = {
+					jid: participant,
+					count: +retryNode.attrs.count
+
 				}
 
 				await relayMessage(key.remoteJid!, msg, msgRelayOpts,)
@@ -957,13 +1112,11 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		const callId = infoChild.attrs['call-id']
 		const from = infoChild.attrs.from || infoChild.attrs['call-creator']
 		status = getCallStatusFromNode(infoChild)
-		if(isLidUser(from) && infoChild.tag==='relaylatency')
-		{
+		if (isLidUser(from) && infoChild.tag === 'relaylatency') {
 			const verify = callOfferCache.get(callId);
-			if(!verify)
-			{
+			if (!verify) {
 				status = 'offer';
-				callOfferCache.set(callId,true);
+				callOfferCache.set(callId, true);
 			}
 
 		}
@@ -994,9 +1147,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		// delete data once call has ended
 		if (status === 'reject' || status === 'accept' || status === 'timeout' || status === 'terminate') {
 			callOfferCache.del(call.id)
-			if(isLidUser(from))
-			{
-			 callOfferCache.del(from)	
+			if (isLidUser(from)) {
+				callOfferCache.del(from)
 			}
 		}
 
@@ -1274,40 +1426,40 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				break
 		}
 	}
-		const handlePresenceUpdate = ({ tag, attrs, content }: BinaryNode) => {
-			let presence: PresenceData | undefined
-			const jid = attrs.from
-			const participant = attrs.participant || attrs.from
-	
-			if (shouldIgnoreJid(jid)) {
-				return
-			}
-	
-			if (tag === 'presence') {
-				presence = {
-					lastKnownPresence: attrs.type === 'unavailable' ? 'unavailable' : 'available',
-					lastSeen: attrs.last && attrs.last !== 'deny' ? +attrs.last : undefined
-				}
-			} else if (Array.isArray(content)) {
-				const [firstChild] = content
-				let type = firstChild.tag as WAPresence
-				if (type === 'paused') {
-					type = 'available'
-				}
-	
-				if (firstChild.attrs?.media === 'audio') {
-					type = 'recording'
-				}
-	
-				presence = { lastKnownPresence: type }
-			} else {
-				logger.error({ tag, attrs, content }, 'recv invalid presence node')
-			}
-	
-			if (presence) {
-				ev.emit('presence.update', { id: jid, presences: { [participant]: presence } })
-			}
+	const handlePresenceUpdate = ({ tag, attrs, content }: BinaryNode) => {
+		let presence: PresenceData | undefined
+		const jid = attrs.from
+		const participant = attrs.participant || attrs.from
+
+		if (shouldIgnoreJid(jid)) {
+			return
 		}
+
+		if (tag === 'presence') {
+			presence = {
+				lastKnownPresence: attrs.type === 'unavailable' ? 'unavailable' : 'available',
+				lastSeen: attrs.last && attrs.last !== 'deny' ? +attrs.last : undefined
+			}
+		} else if (Array.isArray(content)) {
+			const [firstChild] = content
+			let type = firstChild.tag as WAPresence
+			if (type === 'paused') {
+				type = 'available'
+			}
+
+			if (firstChild.attrs?.media === 'audio') {
+				type = 'recording'
+			}
+
+			presence = { lastKnownPresence: type }
+		} else {
+			logger.error({ tag, attrs, content }, 'recv invalid presence node')
+		}
+
+		if (presence) {
+			ev.emit('presence.update', { id: jid, presences: { [participant]: presence } })
+		}
+	}
 
 	// recv a message
 	ws.on('CB:message', (node: BinaryNode) => {

@@ -120,7 +120,7 @@ export type SocketConfig = {
 	}
 
 	/** options for axios */
-	options: AxiosRequestConfig<{}>
+	options: AxiosRequestConfig
 	/**
 	 * fetch a message from your store
 	 * implement this so that messages failed to send

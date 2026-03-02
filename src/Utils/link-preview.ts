@@ -19,7 +19,7 @@ export type URLGenerationOptions = {
 		/** Timeout in ms */
 		timeout: number
 		proxyUrl?: string
-		headers?: AxiosRequestConfig<{}>['headers']
+		headers?: AxiosRequestConfig['headers']
 	}
 	uploadImage?: WAMediaUploadFunction
 	logger?: ILogger

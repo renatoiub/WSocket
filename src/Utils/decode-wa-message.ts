@@ -37,6 +37,21 @@ export const NACK_REASONS = {
 	DBOperationFailed: 552
 }
 
+/**
+ * Server-side error codes returned in ack stanzas (server → client).
+ * Reference: WA Web NackReason codes (GysEGRAXCvh.js:35545)
+ */
+export const SERVER_ERROR_CODES = {
+	/** Group addressing mode is stale — re-query group metadata */
+	StaleGroupAddressingMode: '421',
+	/** 1:1 message missing privacy token (tctoken) */
+	MissingTcToken: '463',
+	/** New chat messages rate limited */
+	NewChatMessagesCapped: '475',
+	/** Stanza validation failure (SMAX_INVALID) — likely stale device session */
+	SmaxInvalid: '479'
+} as const
+
 type MessageType =
 	| 'chat'
 	| 'peer_broadcast'
@@ -66,13 +81,13 @@ export function decodeMessageNode(stanza: BinaryNode, meId: string, meLid: strin
 	const recipient: string | undefined = stanza.attrs.recipient
 	const sender_pn: string | undefined = stanza?.attrs?.sender_pn
 	const peer_recipient_pn: string | undefined = stanza?.attrs?.peer_recipient_pn
-	const peer_recipient_lid :string | undefined = stanza?.attrs?.peer_recipient_lid
+	const peer_recipient_lid: string | undefined = stanza?.attrs?.peer_recipient_lid
 	const fromMe = (isLidUser(from) || isLidUser(participant) ? isMeLid : isMe)(stanza.attrs.participant || stanza.attrs.from);
 
-		if (isJidUser(from) || isLidUser(from)) {
+	if (isJidUser(from) || isLidUser(from)) {
 		if (recipient && !isJidMetaIa(recipient)) {
 			if (!isMe(from) && !isMeLid(from)) {
-			throw new Boom('recipient present, but msg not from me', { data: stanza });
+				throw new Boom('recipient present, but msg not from me', { data: stanza });
 			}
 			chatId = recipient;
 		} else {
@@ -86,27 +101,26 @@ export function decodeMessageNode(stanza: BinaryNode, meId: string, meLid: strin
 		if (fromMe) {
 			const userDestino = jidDecode(jidNormalizedUser(meLid))?.user;
 			author = deviceOrigem
-			? `${userDestino}:${deviceOrigem}@lid`
-			: `${userDestino}@lid`;			
-		} else {
-			if (!sender_lid) {
-			author = from;
-			} else {
-			const userDestino = jidDecode(sender_lid)?.user;
-			author = deviceOrigem
 				? `${userDestino}:${deviceOrigem}@lid`
 				: `${userDestino}@lid`;
+		} else {
+			if (!sender_lid) {
+				author = from;
+			} else {
+				const userDestino = jidDecode(sender_lid)?.user;
+				author = deviceOrigem
+					? `${userDestino}:${deviceOrigem}@lid`
+					: `${userDestino}@lid`;
 			}
 		}
-		if(sender_lid && sender_pn ){
-		const verify = caches.lidCache.get(jidNormalizedUser(sender_pn));
-		 if(!verify)
-		 {
-			caches.lidCache.set(jidNormalizedUser(sender_pn), jidNormalizedUser(sender_lid))
-		 }
+		if (sender_lid && sender_pn) {
+			const verify = caches.lidCache.get(jidNormalizedUser(sender_pn));
+			if (!verify) {
+				caches.lidCache.set(jidNormalizedUser(sender_pn), jidNormalizedUser(sender_lid))
+			}
 		}
 	}
- else if (isJidGroup(from)) {
+	else if (isJidGroup(from)) {
 		if (!participant) {
 			throw new Boom('No participant in group message')
 		}
@@ -117,16 +131,16 @@ export function decodeMessageNode(stanza: BinaryNode, meId: string, meLid: strin
 		if (fromMe) {
 			const userDestino = jidDecode(jidNormalizedUser(meLid))?.user;
 			author = deviceOrigem
-			? `${userDestino}:${deviceOrigem}@lid`
-			: `${userDestino}@lid`;
-		} else {
-			if (!participant_lid) {
-			author = participant;
-			} else {
-			const userDestino = jidDecode(participant_lid)?.user;
-			author = deviceOrigem
 				? `${userDestino}:${deviceOrigem}@lid`
 				: `${userDestino}@lid`;
+		} else {
+			if (!participant_lid) {
+				author = participant;
+			} else {
+				const userDestino = jidDecode(participant_lid)?.user;
+				author = deviceOrigem
+					? `${userDestino}:${deviceOrigem}@lid`
+					: `${userDestino}@lid`;
 			}
 		}
 
@@ -143,8 +157,8 @@ export function decodeMessageNode(stanza: BinaryNode, meId: string, meLid: strin
 		}
 
 		chatId = from
-		author = participant_lid || participant	 		
-	
+		author = participant_lid || participant
+
 	} else if (isJidNewsletter(from)) {
 		msgType = 'newsletter'
 		chatId = from
@@ -153,7 +167,7 @@ export function decodeMessageNode(stanza: BinaryNode, meId: string, meLid: strin
 		throw new Boom('Unknown message type', { data: stanza })
 	}
 
-	
+
 	const pushname = stanza?.attrs?.notify
 
 	const key: WAMessageKey = {
