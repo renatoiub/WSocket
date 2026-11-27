@@ -437,14 +437,6 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				}
 
 				break
-			case 'server_sync':
-				const update = getBinaryNodeChild(node, 'collection')
-				if (update) {
-					const name = update.attrs.name as WAPatchName
-					await resyncAppState([name], false)
-				}
-
-				break
 			case 'picture':
 				const setPicture = getBinaryNodeChild(node, 'set')
 				const delPicture = getBinaryNodeChild(node, 'delete')
@@ -732,6 +724,18 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		const remoteJid = node.attrs.from
 		if (shouldIgnoreJid(remoteJid) && remoteJid !== '@s.whatsapp.net') {
 			logger.debug({ remoteJid, id: node.attrs.id }, 'ignored notification')
+			await sendMessageAck(node)
+			return
+		}
+
+		if (node.attrs.type === 'server_sync') {
+			const update = getBinaryNodeChild(node, 'collection')
+			if (update?.attrs.name) {
+				resyncAppState([update.attrs.name as WAPatchName], false).catch(err =>
+					onUnexpectedError(err, 'server_sync')
+				)
+			}
+
 			await sendMessageAck(node)
 			return
 		}
